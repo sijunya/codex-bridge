@@ -1,0 +1,20 @@
+[Unit]
+Description=Agy Bridge - Antigravity CLI Mobile Bridge
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /opt/agy-bridge/dist/cli.js serve
+WorkingDirectory=/opt/agy-bridge
+Restart=on-failure
+RestartSec=5
+Environment=HOME=/root
+Environment=PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HTTP_PROXY=http://127.0.0.1:7890
+Environment=HTTPS_PROXY=http://127.0.0.1:7890
+Environment=http_proxy=http://127.0.0.1:7890
+Environment=https_proxy=http://127.0.0.1:7890
+Environment=NO_PROXY=localhost,127.0.0.1,192.168.0.0/16,10.0.0.0/8
+
+[Install]
+WantedBy=multi-user.target
