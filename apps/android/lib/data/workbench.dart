@@ -1220,7 +1220,9 @@ class Workbench extends ChangeNotifier {
       await storage.write('cache-${selected.id}', {
         'projects': projects,
         'threads': threads,
-        'timelines': timelines,
+        'timelines': timelines.map(
+          (k, v) => MapEntry(k, v.length > 40 ? v.sublist(v.length - 40) : v),
+        ),
         'projectId': projectId,
         'threadId': threadId,
         'epoch': epoch,

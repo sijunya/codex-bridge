@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -40,10 +41,25 @@ class _ChatPaneState extends State<ChatPane> {
   String? boundDraftId;
   bool _showScrollToBottom = false;
 
+  static const int _pageSize = 25;
+  int _visibleCount = _pageSize;
+  int _lastTotalEntries = 0;
+  int _currentTotalEntries = 0;
+  bool _isLoadingMore = false;
+  Timer? _scrollTimer1;
+  Timer? _scrollTimer2;
+
+  void _resetPagination() {
+    _visibleCount = _pageSize;
+    _lastTotalEntries = 0;
+    _isLoadingMore = false;
+  }
+
   @override
   void initState() {
     super.initState();
     boundThread = widget.workbench.threadId;
+    _resetPagination();
     imageDraft.bind(
       widget.workbench.host?.id,
       widget.workbench.projectId,
@@ -62,9 +78,43 @@ class _ChatPaneState extends State<ChatPane> {
     if (isFarFromBottom != _showScrollToBottom) {
       setState(() => _showScrollToBottom = isFarFromBottom);
     }
+    if (!_isLoadingMore && scroll.position.pixels <= 150) {
+      _checkAutoLoadMore();
+    }
+  }
+
+  void _checkAutoLoadMore() {
+    if (!_isLoadingMore && _visibleCount < _currentTotalEntries) {
+      _loadMore(_currentTotalEntries);
+    }
+  }
+
+  void _loadMore(int totalCount) {
+    if (_isLoadingMore || _visibleCount >= totalCount) return;
+    _isLoadingMore = true;
+    final oldMaxScroll =
+        scroll.hasClients ? scroll.position.maxScrollExtent : 0.0;
+    final oldOffset = scroll.hasClients ? scroll.offset : 0.0;
+
+    setState(() {
+      _visibleCount = math.min(_visibleCount + _pageSize, totalCount);
+    });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && scroll.hasClients) {
+        final newMaxScroll = scroll.position.maxScrollExtent;
+        final delta = newMaxScroll - oldMaxScroll;
+        if (delta > 0) {
+          scroll.jumpTo(oldOffset + delta);
+        }
+      }
+      _isLoadingMore = false;
+    });
   }
 
   void _scrollToBottom([bool animate = false]) {
+    _scrollTimer1?.cancel();
+    _scrollTimer2?.cancel();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !scroll.hasClients) return;
       if (animate) {
@@ -75,12 +125,12 @@ class _ChatPaneState extends State<ChatPane> {
         );
       } else {
         scroll.jumpTo(scroll.position.maxScrollExtent);
-        Future.delayed(const Duration(milliseconds: 60), () {
+        _scrollTimer1 = Timer(const Duration(milliseconds: 60), () {
           if (mounted && scroll.hasClients) {
             scroll.jumpTo(scroll.position.maxScrollExtent);
           }
         });
-        Future.delayed(const Duration(milliseconds: 180), () {
+        _scrollTimer2 = Timer(const Duration(milliseconds: 180), () {
           if (mounted && scroll.hasClients) {
             scroll.jumpTo(scroll.position.maxScrollExtent);
           }
@@ -103,6 +153,7 @@ class _ChatPaneState extends State<ChatPane> {
     if (boundThread != widget.workbench.threadId) {
       final sameDraft = boundDraftId == imageDraft.id;
       boundThread = widget.workbench.threadId;
+      _resetPagination();
       if (!sending || !sameDraft) {
         composerKey.currentState?.clear();
       }
@@ -118,6 +169,8 @@ class _ChatPaneState extends State<ChatPane> {
 
   @override
   void dispose() {
+    _scrollTimer1?.cancel();
+    _scrollTimer2?.cancel();
     scroll.removeListener(_onScroll);
     imageDraft.removeListener(draftChanged);
     scroll.dispose();
@@ -207,15 +260,29 @@ class _ChatPaneState extends State<ChatPane> {
     final activeTurn = workbench.running == null
         ? null
         : workbench.running?['turn']?.toString() ?? 'starting';
-    final entries = _timelineEntries(workbench.items);
+    final allEntries = _timelineEntries(workbench.items);
     if (activeTurn != null &&
-        !entries.any((entry) => entry.process?.turnId == activeTurn)) {
-      entries.add(
+        !allEntries.any((entry) => entry.process?.turnId == activeTurn)) {
+      allEntries.add(
         _TimelineEntry.process(
           _ProcessBlock('turn:$activeTurn', activeTurn, []),
         ),
       );
     }
+
+    _currentTotalEntries = allEntries.length;
+    if (_lastTotalEntries > 0 && allEntries.length > _lastTotalEntries) {
+      _visibleCount += (allEntries.length - _lastTotalEntries);
+    }
+    _lastTotalEntries = allEntries.length;
+
+    final hasMore = allEntries.length > _visibleCount;
+    final entries = hasMore
+        ? allEntries.sublist(allEntries.length - _visibleCount)
+        : allEntries;
+    final showHeader = hasMore || allEntries.length > _pageSize;
+    final totalCount = entries.length + (showHeader ? 1 : 0);
+
     final nearBottom =
         !scroll.hasClients ||
         scroll.position.maxScrollExtent - scroll.offset < 150;
@@ -247,15 +314,31 @@ class _ChatPaneState extends State<ChatPane> {
                           horizontal: 20,
                           vertical: 20,
                         ),
-                        itemCount: entries.length,
+                        itemCount: totalCount,
                         findChildIndexCallback: (key) {
+                          if (showHeader) {
+                            if (key == const ValueKey('load-more-header') ||
+                                key == const ValueKey('history-start-header')) {
+                              return 0;
+                            }
+                          }
                           final index = entries.indexWhere(
                             (entry) => ValueKey(entry.key) == key,
                           );
-                          return index < 0 ? null : index;
+                          if (index < 0) return null;
+                          return showHeader ? index + 1 : index;
                         },
                         itemBuilder: (_, index) {
-                          final entry = entries[index];
+                          if (showHeader && index == 0) {
+                            return hasMore
+                                ? _buildLoadMoreHeader(
+                                    context,
+                                    allEntries.length - _visibleCount,
+                                  )
+                                : _buildHistoryStartHeader(context);
+                          }
+                          final entryIndex = showHeader ? index - 1 : index;
+                          final entry = entries[entryIndex];
                           final process = entry.process;
                           final active =
                               process != null &&
@@ -367,6 +450,120 @@ class _ChatPaneState extends State<ChatPane> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildLoadMoreHeader(BuildContext context, int remainingCount) {
+    return Align(
+      key: const ValueKey('load-more-header'),
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 820),
+        child: Padding(
+          padding: const EdgeInsets.only(top: 4, bottom: 16),
+          child: Center(
+            child: Material(
+              color: Theme.of(context)
+                  .colorScheme
+                  .surfaceContainerHighest
+                  .withValues(alpha: 0.7),
+              borderRadius: BorderRadius.circular(20),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(20),
+                onTap: _isLoadingMore
+                    ? null
+                    : () => _loadMore(_currentTotalEntries),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_isLoadingMore) ...[
+                        const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          '正在加载历史记录…',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color:
+                                Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ] else ...[
+                        Icon(
+                          Icons.arrow_upward_rounded,
+                          size: 16,
+                          color: Theme.of(context).colorScheme.primary,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          '往上滑或点击加载更早记录 (还有 $remainingCount 条)',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                            color: Theme.of(context).colorScheme.primary,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHistoryStartHeader(BuildContext context) {
+    return Align(
+      key: const ValueKey('history-start-header'),
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 820),
+        child: Padding(
+          padding: const EdgeInsets.only(top: 4, bottom: 16),
+          child: Center(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 24,
+                  height: 1,
+                  color: Theme.of(context)
+                      .colorScheme
+                      .outlineVariant
+                      .withValues(alpha: 0.5),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  child: Text(
+                    '已加载全部历史记录',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Theme.of(context).colorScheme.outline,
+                    ),
+                  ),
+                ),
+                Container(
+                  width: 24,
+                  height: 1,
+                  color: Theme.of(context)
+                      .colorScheme
+                      .outlineVariant
+                      .withValues(alpha: 0.5),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
