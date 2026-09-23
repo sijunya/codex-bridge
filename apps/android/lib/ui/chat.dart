@@ -38,6 +38,8 @@ class _ChatPaneState extends State<ChatPane> {
   bool sending = false;
   String? boundThread;
   String? boundDraftId;
+  bool _showScrollToBottom = false;
+
   @override
   void initState() {
     super.initState();
@@ -49,6 +51,42 @@ class _ChatPaneState extends State<ChatPane> {
     );
     imageDraft.addListener(draftChanged);
     boundDraftId = imageDraft.id;
+    scroll.addListener(_onScroll);
+    _scrollToBottom(false);
+  }
+
+  void _onScroll() {
+    if (!scroll.hasClients) return;
+    final isFarFromBottom =
+        scroll.position.maxScrollExtent - scroll.offset > 200;
+    if (isFarFromBottom != _showScrollToBottom) {
+      setState(() => _showScrollToBottom = isFarFromBottom);
+    }
+  }
+
+  void _scrollToBottom([bool animate = false]) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !scroll.hasClients) return;
+      if (animate) {
+        scroll.animateTo(
+          scroll.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      } else {
+        scroll.jumpTo(scroll.position.maxScrollExtent);
+        Future.delayed(const Duration(milliseconds: 60), () {
+          if (mounted && scroll.hasClients) {
+            scroll.jumpTo(scroll.position.maxScrollExtent);
+          }
+        });
+        Future.delayed(const Duration(milliseconds: 180), () {
+          if (mounted && scroll.hasClients) {
+            scroll.jumpTo(scroll.position.maxScrollExtent);
+          }
+        });
+      }
+    });
   }
 
   void draftChanged() {
@@ -68,6 +106,7 @@ class _ChatPaneState extends State<ChatPane> {
       if (!sending || !sameDraft) {
         composerKey.currentState?.clear();
       }
+      _scrollToBottom(false);
     }
     imageDraft.bind(
       widget.workbench.host?.id,
@@ -79,6 +118,7 @@ class _ChatPaneState extends State<ChatPane> {
 
   @override
   void dispose() {
+    scroll.removeListener(_onScroll);
     imageDraft.removeListener(draftChanged);
     scroll.dispose();
     super.dispose();
@@ -197,48 +237,74 @@ class _ChatPaneState extends State<ChatPane> {
                       ? '添加远程主机上的项目目录，即可开始新的编码任务。'
                       : '描述目标，Codex 会在 ${workbench.project?['name']} 中执行。你可以随时查看改动、追加指令或停止任务。',
                 )
-              : SelectionArea(
-                  child: ListView.builder(
-                    key: ValueKey(workbench.threadId),
-                    controller: scroll,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 20,
-                      vertical: 20,
-                    ),
-                    itemCount: entries.length,
-                    findChildIndexCallback: (key) {
-                      final index = entries.indexWhere(
-                        (entry) => ValueKey(entry.key) == key,
-                      );
-                      return index < 0 ? null : index;
-                    },
-                    itemBuilder: (_, index) {
-                      final entry = entries[index];
-                      final process = entry.process;
-                      final active =
-                          process != null &&
-                          activeTurn != null &&
-                          process.turnId == activeTurn;
-                      return Align(
-                        key: ValueKey(entry.key),
-                        alignment: Alignment.topCenter,
-                        child: ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 820),
-                          child: process != null
-                              ? _ProcessGroup(
-                                  key: ValueKey(process.key),
-                                  process: process,
-                                  active: active,
-                                )
-                              : TimelineItem(
-                                  item: entry.item!,
-                                  workbench: workbench,
-                                  threadId: workbench.threadId,
-                                ),
+              : Stack(
+                  children: [
+                    SelectionArea(
+                      child: ListView.builder(
+                        key: ValueKey(workbench.threadId),
+                        controller: scroll,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 20,
                         ),
-                      );
-                    },
-                  ),
+                        itemCount: entries.length,
+                        findChildIndexCallback: (key) {
+                          final index = entries.indexWhere(
+                            (entry) => ValueKey(entry.key) == key,
+                          );
+                          return index < 0 ? null : index;
+                        },
+                        itemBuilder: (_, index) {
+                          final entry = entries[index];
+                          final process = entry.process;
+                          final active =
+                              process != null &&
+                              activeTurn != null &&
+                              process.turnId == activeTurn;
+                          return Align(
+                            key: ValueKey(entry.key),
+                            alignment: Alignment.topCenter,
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 820),
+                              child: process != null
+                                  ? _ProcessGroup(
+                                      key: ValueKey(process.key),
+                                      process: process,
+                                      active: active,
+                                    )
+                                  : TimelineItem(
+                                      item: entry.item!,
+                                      workbench: workbench,
+                                      threadId: workbench.threadId,
+                                    ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    if (_showScrollToBottom)
+                      Positioned(
+                        right: 20,
+                        bottom: 16,
+                        child: Material(
+                          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                          shape: const CircleBorder(),
+                          elevation: 4,
+                          child: InkWell(
+                            customBorder: const CircleBorder(),
+                            onTap: () => _scrollToBottom(true),
+                            child: Padding(
+                              padding: const EdgeInsets.all(8),
+                              child: Icon(
+                                Icons.keyboard_double_arrow_down_rounded,
+                                size: 24,
+                                color: Theme.of(context).colorScheme.primary,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
         ),
         if (workbench.currentApprovals.isNotEmpty)
