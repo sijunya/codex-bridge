@@ -48,8 +48,22 @@ class DeviceStore implements LocalStore {
   }
 
   @override
-  Future<String?> token(String hostId) =>
-      secure.read(key: 'bridge-token-$hostId');
+  Future<String?> token(String hostId) async {
+    final cached = await secure.read(key: 'bridge-token-$hostId');
+    if (cached != null) return cached;
+    try {
+      final file = await _file('tokens');
+      if (await file.exists()) {
+        final json = asJson(jsonDecode(await file.readAsString()));
+        final val = json[hostId]?.toString();
+        if (val != null && val.isNotEmpty) {
+          await secure.write(key: 'bridge-token-$hostId', value: val);
+          return val;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
   @override
   Future<void> saveToken(String hostId, String token) =>
       secure.write(key: 'bridge-token-$hostId', value: token);
