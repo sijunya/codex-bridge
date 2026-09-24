@@ -148,7 +148,14 @@ export class Controller extends EventEmitter {
       this.loaded.add(threadId);
 
       if (this.threadLocks.has(threadId) || (owned && ['running', 'starting'].includes(owned.state))) {
-        throw new BridgeError('THREAD_BUSY', 'Use steer or wait for the active turn');
+        const deadline = Date.now() + 2500;
+        while ((this.threadLocks.has(threadId) || ['running', 'starting'].includes(this.store.thread(threadId)?.state ?? '')) && Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, 50));
+        }
+        owned = this.store.thread(threadId);
+        if (this.threadLocks.has(threadId) || (owned && ['running', 'starting'].includes(owned.state))) {
+          throw new BridgeError('THREAD_BUSY', 'Use steer or wait for the active turn');
+        }
       }
 
       this.threadLocks.add(threadId);

@@ -716,8 +716,19 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
     });
   }
 
-  private steerTurn(_params: ObjectMap): ObjectMap {
-    throw new BridgeError('METHOD_NOT_ALLOWED', 'Steer is not supported; use interrupt and start a new turn');
+  private async steerTurn(params: ObjectMap): Promise<ObjectMap> {
+    const threadId = params.threadId as string;
+    const agyConvId = this.conversationMap.get(threadId);
+    console.log(`[agy] Auto-interrupting active turn for thread ${threadId} to start new turn via steer`);
+    this.killProcess(threadId);
+    if (agyConvId) this.killProcess(agyConvId);
+
+    const deadline = Date.now() + 3000;
+    while ((this.sessions.has(threadId) || (agyConvId && this.sessions.has(agyConvId))) && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 50));
+    }
+
+    return this.startTurn(params);
   }
 
   private interruptTurn(params: ObjectMap): ObjectMap {

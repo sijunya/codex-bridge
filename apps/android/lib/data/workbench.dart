@@ -89,6 +89,11 @@ class Workbench extends ChangeNotifier {
       .toList();
   bool supports(String capability) =>
       (info['capabilities'] as List? ?? []).contains(capability);
+  bool get isAgy =>
+      info['codexVersion']?.toString().startsWith('agy') ?? false;
+  bool get supportsSteer =>
+      supports('steer') ||
+      (!isAgy && (info['capabilities'] as List? ?? []).contains('threads'));
 
   Future<void> initialize() async {
     try {
@@ -814,31 +819,51 @@ class Workbench extends ChangeNotifier {
         );
       }
     }
+    if (active != null) {
+      if (supportsSteer) {
+        final steerParams = <String, dynamic>{
+          'threadId': threadId,
+          'projectId': projectId,
+          'input': normalized,
+          'clientUserMessageId': const Uuid().v4(),
+          'expectedTurnId': active['turn'],
+        };
+        await rpc('turn/steer', steerParams);
+        return;
+      }
+
+      // Host does not support mid-turn steer (e.g. AGY):
+      // Automatically interrupt running turn, wait briefly for idle, then start new turn in same thread.
+      try {
+        await stop();
+      } catch (_) {}
+
+      final deadline = DateTime.now().add(const Duration(milliseconds: 2000));
+      while (running != null && DateTime.now().isBefore(deadline)) {
+        await Future.delayed(const Duration(milliseconds: 50));
+      }
+    }
+
     final params = <String, dynamic>{
       'threadId': threadId,
       'projectId': projectId,
       'input': normalized,
       'clientUserMessageId': const Uuid().v4(),
+      'permissionMode': permissionMode,
     };
-    if (active != null) {
-      params['expectedTurnId'] = active['turn'];
-      await rpc('turn/steer', params);
-    } else {
-      params['permissionMode'] = permissionMode;
-      if (model != null) params['model'] = model;
-      if (effort != null) params['effort'] = effort;
-      if (model != null && modes.any((value) => value['mode'] == mode)) {
-        params['collaborationMode'] = {
-          'mode': mode,
-          'settings': {
-            'model': model,
-            'reasoning_effort': effort,
-            'developer_instructions': null,
-          },
-        };
-      }
-      await rpc('turn/start', params);
+    if (model != null) params['model'] = model;
+    if (effort != null) params['effort'] = effort;
+    if (model != null && modes.any((value) => value['mode'] == mode)) {
+      params['collaborationMode'] = {
+        'mode': mode,
+        'settings': {
+          'model': model,
+          'reasoning_effort': effort,
+          'developer_instructions': null,
+        },
+      };
     }
+    await rpc('turn/start', params);
   }
 
   Future<void> stop() async {

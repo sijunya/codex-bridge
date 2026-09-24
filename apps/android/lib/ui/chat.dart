@@ -435,7 +435,9 @@ class _ChatPaneState extends State<ChatPane> {
                           imageDraft.canSend,
                       attachmentsEnabled: !imageDraft.picking,
                       hint: workbench.running != null
-                          ? '补充指令，调整当前任务…'
+                          ? (workbench.supportsSteer
+                              ? '补充指令，调整当前任务…'
+                              : '正在回复中…')
                           : '描述任务，或提出问题…',
                       onSend: send,
                       onAttachment: attachment,

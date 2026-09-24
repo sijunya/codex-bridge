@@ -37,7 +37,7 @@ export class Controller extends EventEmitter {
       hostName: hostname(), platform: process.platform, homeDirectory: homedir(), epoch: this.store.epoch,
       ready: this.codex.ready, runningTasks: runtime.threads.filter((entry: any) => ['running', 'starting'].includes(entry.state)).length,
       pendingRequests: runtime.approvals.length,
-      capabilities: ['threads', 'streaming', 'approvals', 'models', 'modes', 'skills', 'mcp', 'files', 'diff', 'terminal', 'replay', 'imageUpload', 'imageRead', 'threadDelete'],
+      capabilities: ['threads', 'streaming', 'approvals', 'models', 'modes', 'skills', 'mcp', 'files', 'diff', 'terminal', 'replay', 'imageUpload', 'imageRead', 'threadDelete', 'steer'],
     };
   }
   private notification(message: ObjectMap): void {
