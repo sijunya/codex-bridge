@@ -12,6 +12,8 @@ import { BridgeError, type ObjectMap } from './protocol.js';
 export interface RpcPeer extends EventEmitter {
   ready: boolean;
   request(method: string, params: ObjectMap, timeout?: number): Promise<any>;
+  isTurnActive?(threadId: string): boolean;
+  getMappedConversationId?(threadId: string): string | undefined;
 }
 
 const AGY_DATA_DIR = join(homedir(), '.gemini', 'antigravity-cli');
@@ -20,6 +22,7 @@ const BRAIN_DIR = join(AGY_DATA_DIR, 'brain');
 
 interface CurrentTurn {
   turnId: string;
+  clientThreadId: string;
   prompt: string;
   messageItemId: string;
   reasoningItemId: string;
@@ -77,6 +80,16 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
         }
       }
     }, 60_000).unref();
+  }
+
+  isTurnActive(threadId: string): boolean {
+    const agyConvId = this.conversationMap.get(threadId);
+    const session = this.sessions.get(threadId) || (agyConvId ? this.sessions.get(agyConvId) : undefined);
+    return !!(session && session.currentTurn && session.child.exitCode === null);
+  }
+
+  getMappedConversationId(threadId: string): string | undefined {
+    return this.conversationMap.get(threadId);
   }
 
   async start(): Promise<void> {
@@ -406,7 +419,10 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
     }
 
     if (session?.currentTurn) {
-      throw new BridgeError('INVALID_STATE', 'A turn is already in progress for this thread');
+      console.log(`[agy] Session for thread ${threadId} has previous active turn ${session.currentTurn.turnId}, auto-retiring old turn`);
+      this.killProcess(threadId);
+      if (agyConversationId) this.killProcess(agyConversationId);
+      session = undefined;
     }
 
     // Emit turn/started notification
@@ -444,6 +460,7 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
 
     const currentTurn: CurrentTurn = {
       turnId,
+      clientThreadId: threadId,
       prompt,
       messageItemId: randomUUID(),
       reasoningItemId: randomUUID(),
@@ -519,13 +536,17 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
       try {
         const event = JSON.parse(trimmed);
         const cur = session.currentTurn;
+        const targetThreadId = cur?.clientThreadId || threadId;
 
         if (event.event === 'init' && event.conversation_id) {
           session.agyConversationId = event.conversation_id;
           this.conversationMap.set(threadId, event.conversation_id);
           this.conversationMap.set(event.conversation_id, event.conversation_id);
+          if (cur?.clientThreadId) {
+            this.conversationMap.set(cur.clientThreadId, event.conversation_id);
+          }
           this.sessions.set(event.conversation_id, session);
-          console.log(`[agy] Mapped client thread ${threadId} -> agy conversation ${event.conversation_id}`);
+          console.log(`[agy] Mapped client thread ${threadId} (client: ${cur?.clientThreadId}) -> agy conversation ${event.conversation_id}`);
         }
 
         if (!cur) {
@@ -545,7 +566,7 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
               this.emit('notification', {
                 method: 'item/started',
                 params: {
-                  threadId,
+                  threadId: targetThreadId,
                   item: {
                     id: toolItemId,
                     type: 'commandExecution',
@@ -563,7 +584,7 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
               this.emit('notification', {
                 method: 'item/completed',
                 params: {
-                  threadId,
+                  threadId: targetThreadId,
                   item: {
                     id: toolItemId,
                     type: 'commandExecution',
@@ -583,7 +604,7 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
               this.emit('notification', {
                 method: 'item/started',
                 params: {
-                  threadId,
+                  threadId: targetThreadId,
                   item: { id: cur.reasoningItemId, type: 'reasoning', turnId, summary: [] },
                 },
               });
@@ -591,7 +612,7 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
             }
             this.emit('notification', {
               method: 'item/reasoning/summaryTextDelta',
-              params: { threadId, itemId: cur.reasoningItemId, turnId, summaryIndex: 0, delta: su.thinking_delta },
+              params: { threadId: targetThreadId, itemId: cur.reasoningItemId, turnId, summaryIndex: 0, delta: su.thinking_delta },
             });
           }
 
@@ -602,7 +623,7 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
               this.emit('notification', {
                 method: 'item/completed',
                 params: {
-                  threadId,
+                  threadId: targetThreadId,
                   item: { id: cur.reasoningItemId, type: 'reasoning', turnId },
                 },
               });
@@ -614,7 +635,7 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
               this.emit('notification', {
                 method: 'item/started',
                 params: {
-                  threadId,
+                  threadId: targetThreadId,
                   item: { id: cur.messageItemId, type: 'agentMessage', turnId, content: [{ type: 'text', text: '' }], text: '' },
                 },
               });
@@ -622,7 +643,7 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
             }
             this.emit('notification', {
               method: 'item/agentMessage/delta',
-              params: { threadId, itemId: cur.messageItemId, turnId, delta: su.text_delta },
+              params: { threadId: targetThreadId, itemId: cur.messageItemId, turnId, delta: su.text_delta },
             });
           }
         }
@@ -644,7 +665,7 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
             this.emit('notification', {
               method: 'item/completed',
               params: {
-                threadId,
+                threadId: targetThreadId,
                 item: { id: cur.reasoningItemId, type: 'reasoning', turnId },
               },
             });
@@ -656,7 +677,7 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
             this.emit('notification', {
               method: 'item/started',
               params: {
-                threadId,
+                threadId: targetThreadId,
                 item: { id: cur.messageItemId, type: 'agentMessage', turnId, content: [{ type: 'text', text: finalResponse }], text: finalResponse },
               },
             });
@@ -665,7 +686,7 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
             // Append error text delta if message was already started
             this.emit('notification', {
               method: 'item/agentMessage/delta',
-              params: { threadId, itemId: cur.messageItemId, turnId, delta: `\n\n${finalResponse}` },
+              params: { threadId: targetThreadId, itemId: cur.messageItemId, turnId, delta: `\n\n${finalResponse}` },
             });
           }
 
@@ -673,7 +694,7 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
           this.emit('notification', {
             method: 'item/completed',
             params: {
-              threadId,
+              threadId: targetThreadId,
               item: { id: cur.messageItemId, type: 'agentMessage', turnId, content: [{ type: 'text', text: finalResponse }], text: finalResponse },
             },
           });
@@ -682,7 +703,8 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
           this.emit('notification', {
             method: 'turn/completed',
             params: {
-              threadId,
+              threadId: targetThreadId,
+              agyConversationId: session.agyConversationId,
               turn: {
                 id: turnId,
                 ...(isError ? { error: { message: event.result?.error || 'AGY execution error' } } : {}),
@@ -691,9 +713,9 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
           });
 
           if (isError) {
-            console.log(`[agy] Turn ${turnId} completed with error`);
+            console.log(`[agy] Turn ${turnId} completed with error for thread ${targetThreadId}`);
           } else {
-            console.log(`[agy] Turn ${turnId} completed successfully (session kept alive)`);
+            console.log(`[agy] Turn ${turnId} completed successfully for thread ${targetThreadId} (session kept alive)`);
           }
           cur.hasEmittedMessageStart = false;
           cur.hasEmittedReasoningStart = false;
@@ -714,11 +736,17 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
     child.on('error', (error) => {
       console.error('[agy] Process error for thread', threadId, error);
       const cur = session.currentTurn;
+      const targetThreadId = cur?.clientThreadId || threadId;
       if (cur) {
         this.emit('notification', {
           method: 'turn/completed',
-          params: { threadId, turn: { id: cur.turnId, error: { message: error.message } } },
+          params: {
+            threadId: targetThreadId,
+            agyConversationId: session.agyConversationId,
+            turn: { id: cur.turnId, error: { message: error.message } },
+          },
         });
+        session.currentTurn = undefined;
       }
       this.sessions.delete(threadId);
       if (session.agyConversationId) this.sessions.delete(session.agyConversationId);
@@ -727,13 +755,14 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
     child.on('exit', (code) => {
       console.log(`[agy] Process for thread ${threadId} exited with code ${code}`);
       const cur = session.currentTurn;
+      const targetThreadId = cur?.clientThreadId || threadId;
       if (cur) {
         const errorMsg = stderr.trim() || `agy exited with code ${code}`;
         if (!cur.hasEmittedMessageStart) {
           this.emit('notification', {
             method: 'item/started',
             params: {
-              threadId,
+              threadId: targetThreadId,
               item: { id: cur.messageItemId, type: 'agentMessage', turnId: cur.turnId, content: [{ type: 'text', text: `❌ **[AGY 进程退出]** (code ${code})\n\n\`\`\`\n${errorMsg}\n\`\`\`` }], text: `❌ **[AGY 进程退出]** (code ${code})\n\n\`\`\`\n${errorMsg}\n\`\`\`` },
             },
           });
@@ -741,15 +770,20 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
           this.emit('notification', {
             method: 'item/completed',
             params: {
-              threadId,
+              threadId: targetThreadId,
               item: { id: cur.messageItemId, type: 'agentMessage', turnId: cur.turnId, content: [{ type: 'text', text: `❌ **[AGY 进程退出]** (code ${code})\n\n\`\`\`\n${errorMsg}\n\`\`\`` }], text: `❌ **[AGY 进程退出]** (code ${code})\n\n\`\`\`\n${errorMsg}\n\`\`\`` },
             },
           });
         }
         this.emit('notification', {
           method: 'turn/completed',
-          params: { threadId, turn: { id: cur.turnId, error: { message: errorMsg } } },
+          params: {
+            threadId: targetThreadId,
+            agyConversationId: session.agyConversationId,
+            turn: { id: cur.turnId, error: { message: errorMsg } },
+          },
         });
+        session.currentTurn = undefined;
       }
       this.sessions.delete(threadId);
       if (session.agyConversationId) this.sessions.delete(session.agyConversationId);
@@ -778,13 +812,28 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
   }
 
   private killProcess(threadId: string): void {
-    const session = this.sessions.get(threadId);
+    const agyConvId = this.conversationMap.get(threadId);
+    const session = this.sessions.get(threadId) || (agyConvId ? this.sessions.get(agyConvId) : undefined);
     if (session) {
+      const cur = session.currentTurn;
+      if (cur) {
+        const targetThreadId = cur.clientThreadId || threadId;
+        this.emit('notification', {
+          method: 'turn/completed',
+          params: {
+            threadId: targetThreadId,
+            agyConversationId: session.agyConversationId,
+            turn: { id: cur.turnId, error: { message: 'Turn interrupted by user' } },
+          },
+        });
+        session.currentTurn = undefined;
+      }
       if (session.child.exitCode === null) {
         session.child.kill('SIGTERM');
         setTimeout(() => { if (session.child.exitCode === null) session.child.kill('SIGKILL'); }, 3000);
       }
       this.sessions.delete(threadId);
+      if (agyConvId) this.sessions.delete(agyConvId);
       if (session.agyConversationId) this.sessions.delete(session.agyConversationId);
     }
   }

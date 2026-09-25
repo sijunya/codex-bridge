@@ -47,9 +47,17 @@ export class Controller extends EventEmitter {
 
   private notification(message: ObjectMap): void {
     const params = message.params ?? {};
-    if (message.method === 'turn/started') this.store.threadState(params.threadId, 'running', params.turn?.id);
+    if (message.method === 'turn/started') {
+      this.store.threadState(params.threadId, 'running', params.turn?.id);
+      if (params.agyConversationId && params.agyConversationId !== params.threadId) {
+        this.store.threadState(params.agyConversationId, 'running', params.turn?.id);
+      }
+    }
     if (message.method === 'turn/completed') {
       this.store.threadState(params.threadId, 'idle');
+      if (params.agyConversationId && params.agyConversationId !== params.threadId) {
+        this.store.threadState(params.agyConversationId, 'idle');
+      }
     }
     this.publish(message.method, params);
   }
@@ -148,13 +156,32 @@ export class Controller extends EventEmitter {
       this.loaded.add(threadId);
 
       if (this.threadLocks.has(threadId) || (owned && ['running', 'starting'].includes(owned.state))) {
-        const deadline = Date.now() + 2500;
-        while ((this.threadLocks.has(threadId) || ['running', 'starting'].includes(this.store.thread(threadId)?.state ?? '')) && Date.now() < deadline) {
-          await new Promise(r => setTimeout(r, 50));
-        }
-        owned = this.store.thread(threadId);
-        if (this.threadLocks.has(threadId) || (owned && ['running', 'starting'].includes(owned.state))) {
-          throw new BridgeError('THREAD_BUSY', 'Use steer or wait for the active turn');
+        const isAgyActive = typeof this.agy.isTurnActive === 'function'
+          ? this.agy.isTurnActive(threadId)
+          : false;
+
+        if (!isAgyActive && !this.threadLocks.has(threadId)) {
+          // Stale ghost state in DB! Auto-heal immediately to idle
+          console.log(`[controller] Auto-healing stale running state for thread ${threadId} (no active AGY turn)`);
+          this.store.threadState(threadId, 'idle');
+          owned = this.store.thread(threadId);
+        } else {
+          // AGY is actually running or lock is held. Auto-interrupt previous turn to start new turn seamlessly!
+          console.log(`[controller] Thread ${threadId} is active, auto-interrupting previous turn to start new turn`);
+          try {
+            await this.agy.request('turn/interrupt', { threadId });
+          } catch (e) {
+            console.error(`[controller] Failed to interrupt active turn for thread ${threadId}:`, e);
+          }
+
+          const deadline = Date.now() + 2500;
+          while ((this.threadLocks.has(threadId) || ['running', 'starting'].includes(this.store.thread(threadId)?.state ?? '')) && Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 50));
+          }
+          // Force heal to idle if still marked busy
+          this.store.threadState(threadId, 'idle');
+          this.threadLocks.delete(threadId);
+          owned = this.store.thread(threadId);
         }
       }
 
@@ -176,6 +203,9 @@ export class Controller extends EventEmitter {
 
     // Turn steer/interrupt
     if (method === 'turn/steer' || method === 'turn/interrupt') {
+      const threadId = text(input.threadId, 'threadId');
+      this.threadLocks.delete(threadId);
+      this.store.threadState(threadId, 'idle');
       return this.agy.request(method, input);
     }
 
