@@ -2,7 +2,7 @@ import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:chil
 import { createInterface } from 'node:readline';
 import { EventEmitter } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync } from 'node:fs';
+import { existsSync, copyFileSync, writeFileSync, readFileSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -19,6 +19,8 @@ export interface RpcPeer extends EventEmitter {
 const AGY_DATA_DIR = join(homedir(), '.gemini', 'antigravity-cli');
 const CONVERSATIONS_DB = join(AGY_DATA_DIR, 'conversation_summaries.db');
 const BRAIN_DIR = join(AGY_DATA_DIR, 'brain');
+const TOKEN_FILE = join(AGY_DATA_DIR, 'antigravity-oauth-token');
+const GOLDEN_TOKEN_FILE = join(AGY_DATA_DIR, 'sijunyaya_golden_token.json');
 
 interface CurrentTurn {
   turnId: string;
@@ -69,6 +71,12 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
     super();
     this.agyPath = agyBin();
 
+    // Ensure token is valid on boot and every 60s
+    this.ensureValidToken();
+    setInterval(() => {
+      this.ensureValidToken();
+    }, 60_000).unref();
+
     // Clean up idle sessions after 1 hour of inactivity
     setInterval(() => {
       const now = Date.now();
@@ -82,6 +90,61 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
     }, 60_000).unref();
   }
 
+  ensureValidToken(): void {
+    if (!existsSync(GOLDEN_TOKEN_FILE)) return;
+
+    try {
+      let needsRestore = false;
+      let reason = '';
+
+      if (!existsSync(TOKEN_FILE)) {
+        needsRestore = true;
+        reason = 'Token file does not exist';
+      } else {
+        const raw = readFileSync(TOKEN_FILE, 'utf8');
+        try {
+          const parsed = JSON.parse(raw);
+          let email = '';
+          if (parsed.id_token) {
+            const parts = parsed.id_token.split('.');
+            if (parts.length >= 2) {
+              const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+              email = payload.email || '';
+            }
+          }
+          if (!email || !email.includes('sijunyaya')) {
+            needsRestore = true;
+            reason = `Token email is invalid or rogue (${email || 'unknown'})`;
+          } else {
+            // If current token is valid and newer than golden token, update golden token reference
+            if (parsed.token?.expiry && existsSync(GOLDEN_TOKEN_FILE)) {
+              try {
+                const goldenRaw = readFileSync(GOLDEN_TOKEN_FILE, 'utf8');
+                const goldenParsed = JSON.parse(goldenRaw);
+                const currentExpiry = new Date(parsed.token.expiry).getTime();
+                const goldenExpiry = goldenParsed.token?.expiry ? new Date(goldenParsed.token.expiry).getTime() : 0;
+                if (currentExpiry > goldenExpiry && parsed.token.refresh_token) {
+                  writeFileSync(GOLDEN_TOKEN_FILE, raw, { mode: 0o600 });
+                  console.log(`[agy] Updated golden token with refreshed token (expiry: ${parsed.token.expiry})`);
+                }
+              } catch { /* ignore golden token update error */ }
+            }
+          }
+        } catch (parseErr) {
+          needsRestore = true;
+          reason = `Token file corrupted: ${parseErr}`;
+        }
+      }
+
+      if (needsRestore) {
+        console.warn(`[agy] [GUARD] Restoring golden token: ${reason}`);
+        copyFileSync(GOLDEN_TOKEN_FILE, TOKEN_FILE);
+      }
+    } catch (err) {
+      console.error('[agy] Error in ensureValidToken:', err);
+    }
+  }
+
   isTurnActive(threadId: string): boolean {
     const agyConvId = this.conversationMap.get(threadId);
     const session = this.sessions.get(threadId) || (agyConvId ? this.sessions.get(agyConvId) : undefined);
@@ -93,6 +156,7 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
   }
 
   async start(): Promise<void> {
+    this.ensureValidToken();
     const version = spawnSync(this.agyPath, ['--version'], { encoding: 'utf8', timeout: 15_000 });
     if (version.status !== 0) {
       throw new BridgeError('AGY_NOT_FOUND', `agy CLI not available at ${this.agyPath}: ${version.stderr?.trim()}`);
@@ -390,6 +454,7 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
   }
 
   private async startTurn(params: ObjectMap): Promise<ObjectMap> {
+    this.ensureValidToken();
     const threadId = params.threadId as string;
     const turnId = randomUUID();
     const prompt = this.extractPrompt(params.input);
@@ -488,7 +553,15 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
       const child = spawn(this.agyPath, args, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env },
+        env: {
+          ...process.env,
+          HTTP_PROXY: process.env.HTTP_PROXY || 'http://127.0.0.1:7890',
+          HTTPS_PROXY: process.env.HTTPS_PROXY || 'http://127.0.0.1:7890',
+          http_proxy: process.env.http_proxy || 'http://127.0.0.1:7890',
+          https_proxy: process.env.https_proxy || 'http://127.0.0.1:7890',
+          ALL_PROXY: process.env.ALL_PROXY || 'http://127.0.0.1:7890',
+          all_proxy: process.env.all_proxy || 'http://127.0.0.1:7890',
+        },
       });
 
       const rl = createInterface({ input: child.stdout });
@@ -655,6 +728,10 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
           if (isError) {
             const rawError = event.result?.error || 'AGY 执行发生错误';
             console.error(`[agy] Turn ${turnId} error in result event:`, rawError);
+            if (rawError.includes('Eligib') || rawError.includes('eligible') || rawError.includes('资格')) {
+              console.warn(`[agy] Eligibility error detected in result event, restoring golden token...`);
+              this.ensureValidToken();
+            }
             finalResponse = `❌ **[AGY 执行异常]**\n\n\`\`\`\n${rawError.trim()}\n\`\`\``;
           } else if (!finalResponse.trim()) {
             finalResponse = '（任务已完成，无额外文本输出）';
@@ -758,6 +835,10 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
       const targetThreadId = cur?.clientThreadId || threadId;
       if (cur) {
         const errorMsg = stderr.trim() || `agy exited with code ${code}`;
+        if (errorMsg.includes('Eligib') || errorMsg.includes('eligible') || errorMsg.includes('资格')) {
+          console.warn(`[agy] Eligibility error detected on exit, restoring golden token...`);
+          this.ensureValidToken();
+        }
         if (!cur.hasEmittedMessageStart) {
           this.emit('notification', {
             method: 'item/started',
