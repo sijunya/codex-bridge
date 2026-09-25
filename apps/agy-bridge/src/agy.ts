@@ -628,8 +628,14 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
         }
 
         if (event.event === 'result') {
+          const isError = event.result?.status === 'ERROR' || !!event.result?.error;
           let finalResponse = event.result?.response ?? event.response ?? cur.accumulatedText ?? '';
-          if (!finalResponse.trim()) {
+
+          if (isError) {
+            const rawError = event.result?.error || 'AGY 执行发生错误';
+            console.error(`[agy] Turn ${turnId} error in result event:`, rawError);
+            finalResponse = `❌ **[AGY 执行异常]**\n\n\`\`\`\n${rawError.trim()}\n\`\`\``;
+          } else if (!finalResponse.trim()) {
             finalResponse = '（任务已完成，无额外文本输出）';
           }
 
@@ -655,6 +661,12 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
               },
             });
             cur.hasEmittedMessageStart = true;
+          } else if (isError) {
+            // Append error text delta if message was already started
+            this.emit('notification', {
+              method: 'item/agentMessage/delta',
+              params: { threadId, itemId: cur.messageItemId, turnId, delta: `\n\n${finalResponse}` },
+            });
           }
 
           // Emit item/completed for the message
@@ -669,10 +681,20 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
           // Emit turn/completed
           this.emit('notification', {
             method: 'turn/completed',
-            params: { threadId, turn: { id: turnId } },
+            params: {
+              threadId,
+              turn: {
+                id: turnId,
+                ...(isError ? { error: { message: event.result?.error || 'AGY execution error' } } : {}),
+              },
+            },
           });
 
-          console.log(`[agy] Turn ${turnId} completed successfully (session kept alive)`);
+          if (isError) {
+            console.log(`[agy] Turn ${turnId} completed with error`);
+          } else {
+            console.log(`[agy] Turn ${turnId} completed successfully (session kept alive)`);
+          }
           cur.hasEmittedMessageStart = false;
           cur.hasEmittedReasoningStart = false;
           cur.hasEmittedReasoningComplete = false;
@@ -706,9 +728,27 @@ export class AgyPeer extends EventEmitter implements RpcPeer {
       console.log(`[agy] Process for thread ${threadId} exited with code ${code}`);
       const cur = session.currentTurn;
       if (cur) {
+        const errorMsg = stderr.trim() || `agy exited with code ${code}`;
+        if (!cur.hasEmittedMessageStart) {
+          this.emit('notification', {
+            method: 'item/started',
+            params: {
+              threadId,
+              item: { id: cur.messageItemId, type: 'agentMessage', turnId: cur.turnId, content: [{ type: 'text', text: `❌ **[AGY 进程退出]** (code ${code})\n\n\`\`\`\n${errorMsg}\n\`\`\`` }], text: `❌ **[AGY 进程退出]** (code ${code})\n\n\`\`\`\n${errorMsg}\n\`\`\`` },
+            },
+          });
+          cur.hasEmittedMessageStart = true;
+          this.emit('notification', {
+            method: 'item/completed',
+            params: {
+              threadId,
+              item: { id: cur.messageItemId, type: 'agentMessage', turnId: cur.turnId, content: [{ type: 'text', text: `❌ **[AGY 进程退出]** (code ${code})\n\n\`\`\`\n${errorMsg}\n\`\`\`` }], text: `❌ **[AGY 进程退出]** (code ${code})\n\n\`\`\`\n${errorMsg}\n\`\`\`` },
+            },
+          });
+        }
         this.emit('notification', {
           method: 'turn/completed',
-          params: { threadId, turn: { id: cur.turnId, error: { message: stderr.trim() || `agy exited with code ${code}` } } },
+          params: { threadId, turn: { id: cur.turnId, error: { message: errorMsg } } },
         });
       }
       this.sessions.delete(threadId);
